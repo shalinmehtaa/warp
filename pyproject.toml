@@ -1,0 +1,13 @@
+[project]
+name = "warp"
+version = "0.1.0"
+description = "A repository of CUDA and Triton kernels"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "matplotlib>=3.10.6",
+    "numpy",
+    "pandas>=2.3.2",
+    "torch",
+    "triton",
+]
