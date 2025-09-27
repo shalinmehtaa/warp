@@ -34,7 +34,7 @@ def vector_add_kernel(
 def vector_add(x: torch.Tensor, y: torch.Tensor):
     # pre-allocate memory for output vector
     output = torch.empty_like(x)
-
+    # need number of elements to calculate grid size
     n_elements = x.numel()
     # determine launch grid i.e. number of blocks, 
     # can be either Tuple[int] or Callable[meta] -> Tuple[int]

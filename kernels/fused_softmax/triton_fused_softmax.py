@@ -6,13 +6,13 @@ import triton.language as tl
 def naive_softmax(x: torch.Tensor) -> torch.Tensor:
     """Naive (numerically stable) softmax implementation in PyTorch without any kernel fusion"""
     # get max. for each row: read MN elements, write M elements
-    x_max = x.max(dim=1)[0]
+    x_max = x.max(dim=-1)[0]
     # subtract max. from each row for numerical stability: read MN + M elements, write MN elements
     x_stable = x - x_max[:, None]
     # compute numerator: read MN elements, write MN elements
     numerator = torch.exp(x_stable)
     # compute denominator: read MN elements, write M elements
-    denominator = numerator.sum(dim=1)
+    denominator = numerator.sum(dim=-1)
     # compute softmax: read MN + M elements, write MN elements
     softmax = numerator / denominator[:, None]
     # total reads: 5MN + 2M; total writes: 3MN + 2M
@@ -20,8 +20,14 @@ def naive_softmax(x: torch.Tensor) -> torch.Tensor:
 
 
 @triton.jit
-def fused_softmax_kernel(input_ptr, output_ptr, input_row_stride, output_row_stride, n_rows, n_cols, 
-                         BLOCK_SIZE: tl.constexpr, num_stages: tl.constexpr):
+def fused_softmax_kernel(input_ptr, 
+                         output_ptr, 
+                         input_row_stride, 
+                         output_row_stride, 
+                         n_rows, 
+                         n_cols, 
+                         BLOCK_SIZE: tl.constexpr, 
+                         num_stages: tl.constexpr):
     row_start = tl.program_id(0)
     row_step  = tl.num_programs(0)
     for row_idx in tl.range(row_start, n_rows, row_step, num_stages=num_stages):
@@ -29,14 +35,12 @@ def fused_softmax_kernel(input_ptr, output_ptr, input_row_stride, output_row_str
         output_start_ptr = output_ptr + row_idx * output_row_stride
         col_offsets = tl.arange(0, BLOCK_SIZE)
         mask = col_offsets < n_cols
-        input_ptrs = input_start_ptr + col_offsets
-        output_ptrs = output_start_ptr + col_offsets
-        row = tl.load(input_ptrs, mask=mask, other=float("-inf"))
+        row = tl.load(input_start_ptr + col_offsets, mask=mask, other=float("-inf"))
         row_minus_max = row - tl.max(row, axis=0)
-        numerator = tl.exp(row_minus_max)
-        denominator = tl.sum(numerator, axis=0)
-        softmax = numerator / denominator
-        tl.store(output_ptrs, softmax, mask=mask)
+        num = tl.exp(row_minus_max)
+        den = tl.sum(num, axis=0)
+        out = num / den
+        tl.store(output_start_ptr + col_offsets, out, mask=mask)
 
 
 def fused_softmax(x: torch.Tensor) -> torch.Tensor:
@@ -59,7 +63,7 @@ def fused_softmax(x: torch.Tensor) -> torch.Tensor:
         BLOCK_SIZE=BLOCK_SIZE, 
         num_stages=num_stages, 
         grid=(1,))
-
+    # get register and sram usage based on warmup
     kernel._init_handles()
     n_regs = kernel.n_regs
     size_smem = kernel.metadata.shared
@@ -70,11 +74,10 @@ def fused_softmax(x: torch.Tensor) -> torch.Tensor:
     num_programs = occupancy * NUM_SMS
     # do not need more programs than rows (would be a waste)
     num_programs = min(num_programs, n_rows)
-
     # launch kernel
     fused_softmax_kernel[(num_programs, 1, 1)](x, y, x.stride(0), y.stride(0), n_rows, n_cols, BLOCK_SIZE=BLOCK_SIZE, num_stages=num_stages)
-
     return y
+
 
 if __name__ == "__main__":
     DEVICE = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
@@ -104,7 +107,7 @@ if __name__ == "__main__":
         line_names=["Triton", "Torch", "Naive Softmax"],  # label name for the lines
         styles=[('blue', '-'), ('green', '-'), ('red', '-')],  # line styles
         ylabel="GB/s",  # label name for the y-axis
-        plot_name="softmax-performance",  # name for the plot. Used also as a file name for saving the plot.
+        plot_name="fused-softmax-performance",  # name for the plot. Used also as a file name for saving the plot.
         args={'M': 4096},  # values for function arguments not in `x_names` and `y_name`
     ))
     def benchmark(M, N, provider):
@@ -119,6 +122,5 @@ if __name__ == "__main__":
             ms = triton.testing.do_bench(lambda: naive_softmax(x))
         gbps = lambda ms: 2 * x.numel() * x.element_size() * 1e-9 / (ms * 1e-3)
         return gbps(ms)
-
 
     benchmark.run(print_data=True, save_path=os.path.dirname(__file__))
